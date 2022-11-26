@@ -10,6 +10,15 @@
 #include <cstring>
 #include "MPC/include/CentroidalMPC.h"
 
+/*!
+ * @brief refer to my csdn blog https://blog.csdn.net/weixin_43989965/article/details/128027442
+ * @param input
+ * @return eigen map
+ */
+Eigen::Map<Eigen::MatrixXd> toEigen(casadi::DM &input) {
+    return {input.ptr(), input.rows(), input.columns()};
+}
+
 std::vector<std::string> extractVariablesName(const std::vector<casadi::MX> &variables) {
     std::vector<std::string> variablesName;
     variablesName.reserve(variables.size());
