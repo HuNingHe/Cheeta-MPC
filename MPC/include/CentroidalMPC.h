@@ -10,34 +10,24 @@
  */
 #pragma once
 
-#include <vector>
 #include "NonlinearMPC.h"
 
-/*!
- * Require weights as below
- * @note the following parameters are required by the class
- * |           Parameter Name          |    Type    |                             Description                          |
- * |:---------------------------------:|:----------:|:----------------------------------------------------------------:|
- * |         `omega_dot_weight`        |  `double`  |        Weight associated to the \f$\dot{omega}\f$                |
- * |       `dcm_tracking_weight`       |  `double`  |          Weight associated to the DCM tracking                   |
- * | `omega_dot_rate_of_change_weight` |  `double`  | Weight associated to the rate of change of \f$\dot{omega}\f$     |
- * |    `vrp_rate_of_change_weight`    |  `double`  |      Weight associated to the rate of change of the VRP          |
- * |    `dcm_rate_of_change_weight`    |  `double`  |      Weight associated to the rate of change of the DCM          |
- */
 class CentroidalMPC : public NonlinearMPC {
+private:
     double current_time_;
     double mass_;
     int num_legs_;
+    Eigen::Vector3d foot_step_lb;
+    Eigen::Vector3d foot_step_ub;
     Eigen::VectorXd mu_;
+    void CreateSystemDynamic() final;
 
 public:
     CentroidalMPC(double mass, int num_legs, int predict_horizon, double time_step,
-                  IPOPT_SOLVER ipopt_solver, const Eigen::VectorXd &weights, const Eigen::VectorXd& mu);
+                  const Eigen::VectorXd &weights, const Eigen::VectorXd& mu, IPOPT_SOLVER ipopt_solver = IPOPT_SOLVER::MA97);
     ~CentroidalMPC() = default;
 
     void SetupMPC() final;
-
-    void CreateSystemDynamic() final;
 
     Eigen::VectorXd UpdateMPC(const Eigen::VectorXd &state, const Eigen::VectorXd &des_state, const Eigen::VectorXd &des_inputs) final;
 };
