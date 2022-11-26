@@ -24,14 +24,6 @@ enum class IPOPT_SOLVER: unsigned int {
     MA86 = 6,
     MA97 = 7,
 };
-/*!
- * @brief refer to my csdn blog https://blog.csdn.net/weixin_43989965/article/details/128027442
- * @param input
- * @return eigen map
- */
-Eigen::Map<Eigen::MatrixXd> toEigen(casadi::DM &input) {
-    return {input.ptr(), input.rows(), input.columns()};
-}
 
 class NonlinearMPC {
 protected:
@@ -43,7 +35,7 @@ protected:
     casadi::Function system_dynamic_;     // Updated in CreateSystemDynamic
 
     casadi::DM weights_;
-    Eigen::VectorXd controller_input_;
+    Eigen::VectorXd solution_;
 
     /*!
      * System state space dynamic:
@@ -109,7 +101,7 @@ public:
     }
 
     void UpdateWeights(const Eigen::VectorXd &weights) {
-        toEigen(weights_) = weights;
+        std::memcpy(weights_.ptr(), weights.data(), sizeof(double) * weights_.rows());
     }
 
     /*!
