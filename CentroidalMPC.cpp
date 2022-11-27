@@ -10,30 +10,6 @@
 #include <cstring>
 #include "CentroidalMPC.h"
 
-/*!
- * @brief refer to my csdn blog https://blog.csdn.net/weixin_43989965/article/details/128027442
- * @param input
- * @return eigen map
- */
-Eigen::Map<Eigen::MatrixXd> toEigen(casadi::DM &input) {
-    return {input.ptr(), input.rows(), input.columns()};
-}
-
-std::vector<std::string> extractVariablesName(const std::vector<casadi::MX> &variables) {
-    std::vector<std::string> variablesName;
-    variablesName.reserve(variables.size());
-    for (const auto &variable: variables) {
-        variablesName.push_back(variable.name());
-    }
-    return variablesName;
-}
-
-template<class T>
-auto extractFutureValuesFromState(T &variable) {
-    using Sl = casadi::Slice;
-    return variable(Sl(), Sl(1, variable.columns()));
-}
-
 CentroidalMPC::CentroidalMPC(double mass,
                              int num_legs,
                              int predict_horizon,
@@ -51,6 +27,8 @@ CentroidalMPC::CentroidalMPC(double mass,
     num_legs_ = num_legs;
     mu_ = mu;
     current_time_ = 0;
+    foot_step_lb << -0.2, -0.2, -0.1;
+    foot_step_ub << 0.2, 0.2, 0.1;
 }
 
 /*!
@@ -61,6 +39,15 @@ CentroidalMPC::CentroidalMPC(double mass,
  * dynamic_output is x_{k+1} exclude contact_enable.
  */
 void CentroidalMPC::CreateSystemDynamic() {
+    auto extractVariablesName = [](const std::vector<casadi::MX> &variables) -> std::vector<std::string> {
+        std::vector<std::string> variablesName;
+        variablesName.reserve(variables.size());
+        for (const auto &variable: variables) {
+            variablesName.push_back(variable.name());
+        }
+        return variablesName;
+    };
+
     std::vector<casadi::MX> foot_pos{};
     std::vector<casadi::MX> foot_vel{};
     std::vector<casadi::MX> contact_force{};
@@ -179,13 +166,13 @@ void CentroidalMPC::SetupMPC() {
         opti_.subject_to(cur_foot_pos[i] == foot_pos[i](Sl(), 0));
     }
 
-    opti_.subject_to(extractFutureValuesFromState(com_pos) == full_trajectory[0]);
-    opti_.subject_to(extractFutureValuesFromState(com_vel) == full_trajectory[1]);
-    opti_.subject_to(extractFutureValuesFromState(angular_momentum) == full_trajectory[2]);
+    opti_.subject_to(com_pos(Sl(), Sl(1, predict_horizon_ + 1)) == full_trajectory[0]);
+    opti_.subject_to(com_vel(Sl(), Sl(1, predict_horizon_ + 1)) == full_trajectory[1]);
+    opti_.subject_to(angular_momentum(Sl(), Sl(1, predict_horizon_ + 1)) == full_trajectory[2]);
 
     // footstep dynamics
     for (int i = 0; i < num_legs_; ++i) {
-        opti_.subject_to(extractFutureValuesFromState(foot_pos[i]) == full_trajectory[3 + i]);
+        opti_.subject_to(foot_pos[i](Sl(), Sl(1, predict_horizon_ + 1)) == full_trajectory[3 + i]);
     }
 
     // add constraints for the contacts
@@ -206,10 +193,10 @@ void CentroidalMPC::SetupMPC() {
         // https://groups.google.com/forum/#!topic/casadi-users/npPcKItdLN8
         // Assumption: the matrices as stored as column-major
         std::memcpy(friction_cone.ptr(), friction_cone_eigen.data(), sizeof(double) * 5 * 3);
-        auto delta_foot_pos = extractFutureValuesFromState(foot_pos[i]) - extractFutureValuesFromState(des_foot_pos[i]);
+        auto delta_foot_pos = foot_pos[i](Sl(), Sl(1, predict_horizon_ + 1)) - des_foot_pos[i](Sl(), Sl(1, predict_horizon_ + 1));
         for (int j = 0; j < predict_horizon_; j++) {
             opti_.subject_to(step_lb[i] <= delta_foot_pos(Sl(), j) <= step_ub[i]);
-            opti_.subject_to(force_lb <= casadi::MX::mtimes(friction_cone, contact_force[i](Sl(), j)) <= force_ub);
+            opti_.subject_to(force_lb <= casadi::MX::mtimes(friction_cone, contact_force[i](Sl(), j)) <= force_ub * contact_enable[i](j));
         }
     }
 
@@ -294,12 +281,13 @@ Eigen::VectorXd CentroidalMPC::UpdateMPC(const Eigen::VectorXd &state, const Eig
     casadi::DM cur_angular_momentum = casadi::DM::zeros(3);
     std::vector<casadi::DM> cur_foot_pos;
 
-    toEigen(cur_com_pos) = state.segment(0, 3);
-    toEigen(cur_com_vel) = state.segment(3, 3);
-    toEigen(cur_angular_momentum) = state.segment(6, 3);
+    std::memcpy(cur_com_pos.ptr(), state.data(), 3 * sizeof(double));
+    std::memcpy(cur_com_vel.ptr(), state.data() + 3, 3 * sizeof(double));
+    std::memcpy(cur_angular_momentum.ptr(), state.data() + 6, 3 * sizeof(double));
+
     for (int i = 0; i < num_legs_; ++i) {
         cur_foot_pos.push_back(casadi::DM::zeros(3));
-        toEigen(cur_foot_pos[i]) = state.segment(9 + i * 3, 3);
+        std::memcpy(cur_foot_pos[i].ptr(), state.data() + 9 + i * 3, 3 * sizeof(double));
     }
 
     casadi::DM des_com_pos = casadi::DM::zeros(3, predict_horizon_ + 1);
@@ -317,22 +305,35 @@ Eigen::VectorXd CentroidalMPC::UpdateMPC(const Eigen::VectorXd &state, const Eig
     std::vector<casadi::DM> step_ub;
 
     Eigen::MatrixXd mpc_table = Eigen::MatrixXd::Zero(num_legs_, predict_horizon_);
+
     for (int i = 0; i < num_legs_; ++i) {
         des_foot_pos.push_back(casadi::DM::zeros(3, predict_horizon_ + 1));
         des_contact_force.push_back(casadi::DM::zeros(3, predict_horizon_));
         contact_enable.push_back(casadi::DM::zeros(1, predict_horizon_));
         step_lb.push_back(casadi::DM::zeros(3));
         step_ub.push_back(casadi::DM::zeros(3));
-
-        std::memcpy(contact_enable[i].ptr(), des_inputs.data(), sizeof(double) * predict_horizon_);
-        std::memcpy(des_foot_pos[i].ptr(), des_inputs.data() + predict_horizon_, sizeof(double) * 3 * (predict_horizon_ + 1));
         
-        std::memcpy(des_contact_force[i].ptr(), des_inputs.data() + 4 * predict_horizon_ + 3, sizeof(double) * 3 * predict_horizon_);
+        std::memcpy(contact_enable[i].ptr(), des_inputs.data() + i * (4 * predict_horizon_ + 3), sizeof(double) * predict_horizon_);
+        std::memcpy(des_foot_pos[i].ptr(), des_inputs.data() + predict_horizon_ + i * (4 * predict_horizon_ + 3), sizeof(double) * 3 * (predict_horizon_ + 1));
+        
+        mpc_table.row(i) = des_inputs.segment(i * (4 * predict_horizon_ + 3), predict_horizon_);
 
         std::memcpy(step_lb[i].ptr(), foot_step_lb.data(), sizeof(double) * 3);
         std::memcpy(step_ub[i].ptr(), foot_step_ub.data(), sizeof(double) * 3);
     }
 
+    std::cout << mpc_table << std::endl;
+    for (int i = 0; i < num_legs_; i++) {
+        for (int j = 0; j < predict_horizon_; j++) {
+            if (mpc_table.col(j).sum() <= 0){
+                throw std::runtime_error("mpc table invalid");
+            }
+            if (mpc_table(i, j) > 0){
+                des_contact_force[i](2, j) = mass_ * 9.81 / mpc_table.col(j).sum();
+            }
+        }
+    }
+    
     std::vector<casadi::DM> inputs;
     inputs.emplace_back(cur_com_pos);
     inputs.emplace_back(cur_com_vel);
@@ -352,9 +353,17 @@ Eigen::VectorXd CentroidalMPC::UpdateMPC(const Eigen::VectorXd &state, const Eig
 
     auto output = controller_(inputs);
 
-//    std::memcpy(output[0])
-    std::cout << "foot_pos:\n" << output[0] << std::endl;
-    std::cout << "contact_force:\n" << output[1] << std::endl;
+    // int index = 0;
+    for (auto out : output) {
+        // std::cout << "foot pos in horizon:" << index << "\n" << std::endl;
+        std::cout << out << std::endl;
+        // std::cout << "contact force in horizon:" << index << "\n" << std::endl;
+        // index++;
+    }
+    
+    // std::cout << "desire input test for first horizon:\n" << std::endl;
+    // std::cout << "foot_pos:\n" << output[0] << std::endl;
+    // std::cout << "contact_force:\n" << output[5] << std::endl;
 
     current_time_ += time_step_;
     return {};
