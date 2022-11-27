@@ -44,6 +44,14 @@ int main(){
              0.35, -0.054, 0,  // rf foot pos
              -0.37, -0.053, 0, // rh foot pos
              -0.36, 0.054, 0;  // lh foot pos 
+    
+    Eigen::MatrixXd mpc_table = Eigen::MatrixXd::Zero(horizon, num_legs);
+    mpc_table << 1, 0, 1, 0,
+                 1, 0, 1, 0,
+                 1, 0, 1, 0,
+                 0, 1, 0, 1,
+                 0, 1, 0, 1,
+                 0, 1, 0, 1;
 
     mpc->UpdateMPC(state, des_state, des_input);
     std::cout << "heihei" << std::endl;
